@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { VRButton } from 'three/addons/webxr/VRButton.js';
 import { XRControllerModelFactory } from 'three/addons/webxr/XRControllerModelFactory.js';
+import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { createScenery, TRAVEL_SPEED } from './scenery.js';
 import { createControls } from './controls.js';
 import { createLofi } from './lofi.js';
@@ -177,6 +178,58 @@ for (let i = 0; i < 10; i++) {
   blades.add(g);
 }
 fan.add(blades);
+
+// Bake static toon surfaces (and their edge lines) into one mesh per material.
+// Glass, the fan, the sail and the wheels stay as they are; screens are added later.
+function mergeStatic(group, skip) {
+  group.updateMatrixWorld(true);
+  const meshBuckets = new Map();
+  const lineBuckets = new Map();
+  for (const mesh of [...group.children]) {
+    if (skip.has(mesh)) continue;
+    if (!(mesh instanceof THREE.Mesh)) continue;
+    const mat = mesh.material;
+    if (!(mat instanceof THREE.MeshToonMaterial) || mat.map) continue;
+
+    let geo = mesh.geometry.clone();
+    if (geo.index) geo = geo.toNonIndexed();
+    for (const name of Object.keys(geo.attributes)) {
+      if (name !== 'position' && name !== 'normal' && name !== 'uv') geo.deleteAttribute(name);
+    }
+    geo.applyMatrix4(mesh.matrix);
+    const key = [mat.color.getHex(), mat.emissive.getHex(), mat.emissiveIntensity, mat.transparent, mat.opacity, mat.side].join('|');
+    let bucket = meshBuckets.get(key);
+    if (!bucket) {
+      bucket = { material: mat, geos: [] };
+      meshBuckets.set(key, bucket);
+    }
+    bucket.geos.push(geo);
+
+    for (const line of mesh.children) {
+      if (!(line instanceof THREE.LineSegments)) continue;
+      const lg = line.geometry.clone();
+      lg.applyMatrix4(mesh.matrix);
+      lg.applyMatrix4(line.matrix);
+      const lm = line.material;
+      const lkey = `${lm.color.getHex()}|${lm.opacity}`;
+      let lb = lineBuckets.get(lkey);
+      if (!lb) {
+        lb = { material: lm, geos: [] };
+        lineBuckets.set(lkey, lb);
+      }
+      lb.geos.push(lg);
+    }
+    group.remove(mesh);
+  }
+  for (const { material, geos } of meshBuckets.values()) {
+    group.add(new THREE.Mesh(mergeGeometries(geos), material));
+  }
+  for (const { material, geos } of lineBuckets.values()) {
+    group.add(new THREE.LineSegments(mergeGeometries(geos), material));
+  }
+}
+mergeStatic(cabin, new Set([glass, fan]));
+mergeStatic(hull, new Set([sail, ...wheels]));
 
 function makeCanvas(w, h) {
   const c = document.createElement('canvas');

@@ -3,6 +3,7 @@
 // different speeds. Nothing here rises or falls over time, and every piece
 // sits outside the cabin (window wall is at z = -3.5, the floor at y = 0).
 import * as THREE from 'three';
+import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 
 const TAU = Math.PI * 2;
 export const GROUND_Y = -2.3; // where the wheels touch
@@ -130,13 +131,20 @@ function sunDisc() {
   const disc = new THREE.Mesh(new THREE.CircleGeometry(15, 48), new THREE.MeshBasicMaterial({ color: 0xffe0a8, fog: false }));
   const ring = new THREE.Mesh(new THREE.RingGeometry(15, 21, 48), new THREE.MeshBasicMaterial({ color: 0xffb27a, fog: false, transparent: true, opacity: 0.35, depthWrite: false }));
   // Cartoon sunset bands across the lower half of the sun.
-  for (let i = 0; i < 3; i++) {
-    const band = new THREE.Mesh(new THREE.PlaneGeometry(34, 1.1 + i * 0.5), new THREE.MeshBasicMaterial({ color: 0xff8f6a, fog: false }));
-    band.position.set(0, -4 - i * 3.6, 0.05);
-    g.add(band);
-  }
   // Each band is a little narrower than the disc at its height, so none pokes out.
-  g.children.forEach((b, i) => { b.scale.x = [0.86, 0.7, 0.48][i]; });
+  const bands = [];
+  const bandMat = new THREE.Matrix4();
+  const bandPos = new THREE.Vector3();
+  const bandQuat = new THREE.Quaternion();
+  const bandScale = new THREE.Vector3();
+  const bandWidths = [0.86, 0.7, 0.48];
+  for (let i = 0; i < 3; i++) {
+    const geo = new THREE.PlaneGeometry(34, 1.1 + i * 0.5);
+    geo.applyMatrix4(bandMat.compose(
+      bandPos.set(0, -4 - i * 3.6, 0.05), bandQuat, bandScale.set(bandWidths[i], 1, 1)));
+    bands.push(geo);
+  }
+  g.add(new THREE.Mesh(mergeGeometries(bands), new THREE.MeshBasicMaterial({ color: 0xff8f6a, fog: false })));
   g.add(disc, ring);
   disc.position.z = -0.05; ring.position.z = -0.1;
   g.position.copy(p);
@@ -167,19 +175,29 @@ function sandStreaks() {
   const g = new THREE.Group();
   const mat = new THREE.MeshBasicMaterial({ color: 0x6b4a73, fog: false });
   const matLight = new THREE.MeshBasicMaterial({ color: 0x8a5e86, fog: false });
+  const dark = [];
+  const light = [];
+  const baked = new THREE.Matrix4();
+  const q = new THREE.Quaternion().setFromEuler(new THREE.Euler(-Math.PI / 2, 0, 0));
+  const v = new THREE.Vector3();
+  const unit = new THREE.Vector3(1, 1, 1);
   let s = 7;
   const rnd = () => ((s = (s * 16807) % 2147483647) / 2147483647);
   for (let rep = -3; rep <= 3; rep++) {
     for (let i = 0; i < 22; i++) {
       const len = 2 + rnd() * 7;
-      const m = new THREE.Mesh(new THREE.PlaneGeometry(len, 0.12 + rnd() * 0.2), rnd() > 0.5 ? mat : matLight);
-      m.rotation.x = -Math.PI / 2;
+      const geo = new THREE.PlaneGeometry(len, 0.12 + rnd() * 0.2);
+      const bucket = rnd() > 0.5 ? dark : light;
       // Same pattern in every repeat, so the wrap is invisible.
-      m.position.set(rep * period + rnd() * period - period / 2, GROUND_Y + 0.01, -8 - rnd() * 13);
-      g.add(m);
+      geo.applyMatrix4(baked.compose(
+        v.set(rep * period + rnd() * period - period / 2, GROUND_Y + 0.01, -8 - rnd() * 13),
+        q, unit));
+      bucket.push(geo);
     }
     s = 7; // restart the sequence for the next repeat
   }
+  g.add(new THREE.Mesh(mergeGeometries(dark), mat));
+  g.add(new THREE.Mesh(mergeGeometries(light), matLight));
   return { group: g, period };
 }
 
@@ -189,22 +207,28 @@ function clouds() {
   const top = new THREE.MeshBasicMaterial({ color: 0xf6b3c2, fog: false });
   const under = new THREE.MeshBasicMaterial({ color: 0xff9f7e, fog: false });
   const shapes = [[-180, 30, 46], [-60, 37, 34], [70, 26, 52], [190, 33, 38]];
+  const topGeos = [];
+  const underGeos = [];
+  const baked = new THREE.Matrix4();
+  const pos = new THREE.Vector3();
+  const quat = new THREE.Quaternion();
+  const scl = new THREE.Vector3();
   for (let rep = -2; rep <= 2; rep++) {
     shapes.forEach(([x, y, w]) => {
-      const c = new THREE.Group();
-      const body = new THREE.Mesh(new THREE.CircleGeometry(1, 32), top);
-      body.scale.set(w / 2, 3.2, 1);
-      const belly = new THREE.Mesh(new THREE.CircleGeometry(1, 32), under);
-      belly.scale.set(w / 2.4, 1.6, 1);
-      belly.position.set(w * 0.06, -2.4, 0.1);
-      const puff = new THREE.Mesh(new THREE.CircleGeometry(1, 24), top);
-      puff.scale.set(w / 5, 3.4, 1);
-      puff.position.set(-w * 0.12, 2.2, -0.1);
-      c.add(puff, body, belly);
-      c.position.set(rep * period + x, y, 0);
-      g.add(c);
+      const cx = rep * period + x;
+      // Puff sits behind the body and the belly in front; the z offsets keep that order.
+      const puff = new THREE.CircleGeometry(1, 24);
+      puff.applyMatrix4(baked.compose(pos.set(cx - w * 0.12, y + 2.2, -0.1), quat, scl.set(w / 5, 3.4, 1)));
+      const body = new THREE.CircleGeometry(1, 32);
+      body.applyMatrix4(baked.compose(pos.set(cx, y, 0), quat, scl.set(w / 2, 3.2, 1)));
+      const belly = new THREE.CircleGeometry(1, 32);
+      belly.applyMatrix4(baked.compose(pos.set(cx + w * 0.06, y - 2.4, 0.1), quat, scl.set(w / 2.4, 1.6, 1)));
+      topGeos.push(puff, body);
+      underGeos.push(belly);
     });
   }
+  g.add(new THREE.Mesh(mergeGeometries(topGeos), top));
+  g.add(new THREE.Mesh(mergeGeometries(underGeos), under));
   g.position.z = -230;
   return { group: g, period };
 }
