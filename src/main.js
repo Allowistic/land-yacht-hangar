@@ -4,6 +4,7 @@ import { XRControllerModelFactory } from 'three/addons/webxr/XRControllerModelFa
 import { createScenery, TRAVEL_SPEED } from './scenery.js';
 import { createControls } from './controls.js';
 import { createLofi } from './lofi.js';
+import { createBeamIn } from './beamin.js';
 
 const PAL = {
   wall: 0xc4b6c8, wallDeep: 0xa898b0, floor: 0xb8b0c4,
@@ -330,6 +331,10 @@ window.__lyh = {
   scene, camera,
 };
 
+// Beamed in from the Fiction Factory cantina teleporter (#beamin): transporter rematerialise around you.
+const beamIn = createBeamIn(scene, camera);
+window.__lyh.beamIn = beamIn;
+
 const WHEEL_R = 1.15;
 let last = 0;
 renderer.setAnimationLoop((time) => {
@@ -338,6 +343,7 @@ renderer.setAnimationLoop((time) => {
   last = time;
   controls.update(dt);
   scenery.update(dt);
+  beamIn.update(t);
   wheels.forEach((w) => { w.rotation.x -= dt * TRAVEL_SPEED / WHEEL_R; });
   blades.rotation.z = t * 0.4;
   const dp = dust.geometry.attributes.position;
