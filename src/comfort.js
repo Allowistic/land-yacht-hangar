@@ -1,3 +1,5 @@
+import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
+
 // VR comfort shared with the Fiction Factory showroom (same origin, same key).
 
 const DEFAULTS = { turn: 'snap30', vignette: true, move: 'smooth', lefty: false };
@@ -39,7 +41,7 @@ function stickX(x) {
   return Math.sign(x) * (Math.min(a, 1) - DEADZONE) / (1 - DEADZONE);
 }
 
-export function createXRLoco({ THREE, renderer, rig, camera, bounds }) {
+export function createXRLoco({ THREE, renderer, rig, camera, bounds, controllers = [] }) {
   const vignetteMat = new THREE.MeshBasicMaterial({
     color: 0x000000,
     transparent: true,
@@ -54,11 +56,36 @@ export function createXRLoco({ THREE, renderer, rig, camera, bounds }) {
   vignette.frustumCulled = false;
   camera.add(vignette);
 
+  const marker = new THREE.Mesh(
+    mergeGeometries([
+      new THREE.RingGeometry(0.22, 0.27, 32),
+      new THREE.CircleGeometry(0.06, 16),
+    ]).rotateX(-Math.PI / 2),
+    new THREE.MeshBasicMaterial({ color: 0x7ff0e2, transparent: true, opacity: 0.85, depthWrite: false }),
+  );
+  marker.renderOrder = 3;
+  marker.visible = false;
+  (rig.parent || rig).add(marker);
+  for (let i = 0; i < controllers.length; i++) {
+    const c = controllers[i];
+    c.addEventListener('connected', (e) => { c.userData.handedness = e.data.handedness; });
+  }
+
   const quat = new THREE.Quaternion();
   const head = new THREE.Vector3();
+  const origin = new THREE.Vector3();
+  const dir = new THREE.Vector3();
   const yawEuler = new THREE.Euler(0, 0, 0, 'YXZ');
   const yAxis = new THREE.Vector3(0, 1, 0);
   let snapArmed = true;
+  let aim = null; // controller currently aiming
+  let hiddenLine = null;
+
+  function restoreLine() {
+    if (!hiddenLine) return;
+    hiddenLine.visible = true;
+    hiddenLine = null;
+  }
 
   // getCamera() is not parented to the rig; its pose is reference-space.
   // A camera already in the rig's hierarchy already has a world pose.
@@ -97,6 +124,9 @@ export function createXRLoco({ THREE, renderer, rig, camera, bounds }) {
     snapArmed = true;
     vignetteMat.opacity = 0;
     vignette.visible = false;
+    marker.visible = false;
+    restoreLine();
+    aim = null;
   }
 
   function update(dt) {
@@ -153,6 +183,62 @@ export function createXRLoco({ THREE, renderer, rig, camera, bounds }) {
             const step = comfort.turn === 'snap45' ? Math.PI / 4 : Math.PI / 6;
             rotateAboutHead(-Math.sign(x) * step);
           }
+        }
+      }
+
+      let aimPressed = false;
+      for (let i = 0; i < controllers.length; i++) {
+        const c = controllers[i];
+        const hand = c.userData.handedness;
+        let source = null;
+        if (hand) {
+          for (let j = 0; j < sources.length; j++) {
+            if (sources[j].handedness === hand) {
+              source = sources[j];
+              break;
+            }
+          }
+        }
+        const pressed = !!source?.gamepad?.buttons?.[0]?.pressed;
+        if (pressed && aim === null) aim = c;
+        if (c === aim) aimPressed = pressed;
+      }
+
+      if (aim) {
+        if (aimPressed) {
+          aim.getWorldPosition(origin);
+          dir.set(0, 0, -1).transformDirection(aim.matrixWorld);
+          if (dir.y < -0.05) {
+            const t = -origin.y / dir.y;
+            if (t < 8) {
+              let x = origin.x + dir.x * t;
+              let z = origin.z + dir.z * t;
+              if (x < bounds.minX) x = bounds.minX;
+              else if (x > bounds.maxX) x = bounds.maxX;
+              if (z < bounds.minZ) z = bounds.minZ;
+              else if (z > bounds.maxZ) z = bounds.maxZ;
+              marker.position.set(x, 0.01, z);
+              marker.visible = true;
+            } else marker.visible = false;
+          } else marker.visible = false;
+          if (!hiddenLine) {
+            for (let i = 0; i < aim.children.length; i++) {
+              if (aim.children[i].isLine) {
+                hiddenLine = aim.children[i];
+                break;
+              }
+            }
+          }
+          if (hiddenLine) hiddenLine.visible = false;
+        } else {
+          if (marker.visible) {
+            headWorld(head);
+            rig.position.x += marker.position.x - head.x;
+            rig.position.z += marker.position.z - head.z;
+          }
+          marker.visible = false;
+          restoreLine();
+          aim = null;
         }
       }
     }

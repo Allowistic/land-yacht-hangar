@@ -87,6 +87,7 @@ function buildStrip(layer) {
   const rimGeo = new THREE.BufferGeometry();
   rimGeo.setAttribute('position', new THREE.BufferAttribute(top, 3));
   const rim = new THREE.Line(rimGeo, new THREE.LineBasicMaterial({ color: layer.rim, fog: false }));
+  rim.userData.rim = true;
   const group = new THREE.Group();
   group.add(mesh, rim);
   group.position.z = z;
@@ -125,28 +126,48 @@ function skyDome() {
   return dome;
 }
 
+// Flat colour in the linear values THREE.Color stores, so pieces that used to
+// be separate materials can share one vertex-coloured mesh.
+function paint(geo, color) {
+  const n = geo.attributes.position.count;
+  const arr = new Float32Array(n * 3);
+  const { r, g, b } = color;
+  for (let i = 0; i < n; i++) {
+    arr[i * 3] = r;
+    arr[i * 3 + 1] = g;
+    arr[i * 3 + 2] = b;
+  }
+  geo.setAttribute('color', new THREE.Float32BufferAttribute(arr, 3));
+  return geo;
+}
+
 function sunDisc() {
   const g = new THREE.Group();
   const p = SUN_DIR.clone().multiplyScalar(290);
-  const disc = new THREE.Mesh(new THREE.CircleGeometry(15, 48), new THREE.MeshBasicMaterial({ color: 0xffe0a8, fog: false }));
+  // Halo stays its own mesh: it is transparent, so it cannot share the opaque draw.
   const ring = new THREE.Mesh(new THREE.RingGeometry(15, 21, 48), new THREE.MeshBasicMaterial({ color: 0xffb27a, fog: false, transparent: true, opacity: 0.35, depthWrite: false }));
+  ring.position.z = -0.1;
+  const disc = new THREE.CircleGeometry(15, 48);
+  disc.translate(0, 0, -0.05);
+  paint(disc, new THREE.Color(0xffe0a8));
   // Cartoon sunset bands across the lower half of the sun.
   // Each band is a little narrower than the disc at its height, so none pokes out.
-  const bands = [];
+  const parts = [disc];
   const bandMat = new THREE.Matrix4();
   const bandPos = new THREE.Vector3();
   const bandQuat = new THREE.Quaternion();
   const bandScale = new THREE.Vector3();
+  const bandColor = new THREE.Color(0xff8f6a);
   const bandWidths = [0.86, 0.7, 0.48];
   for (let i = 0; i < 3; i++) {
     const geo = new THREE.PlaneGeometry(34, 1.1 + i * 0.5);
     geo.applyMatrix4(bandMat.compose(
       bandPos.set(0, -4 - i * 3.6, 0.05), bandQuat, bandScale.set(bandWidths[i], 1, 1)));
-    bands.push(geo);
+    paint(geo, bandColor);
+    parts.push(geo);
   }
-  g.add(new THREE.Mesh(mergeGeometries(bands), new THREE.MeshBasicMaterial({ color: 0xff8f6a, fog: false })));
-  g.add(disc, ring);
-  disc.position.z = -0.05; ring.position.z = -0.1;
+  g.add(new THREE.Mesh(mergeGeometries(parts), new THREE.MeshBasicMaterial({ vertexColors: true, fog: false })));
+  g.add(ring);
   g.position.copy(p);
   g.lookAt(0, 1.6, 0);
   return g;
@@ -173,10 +194,9 @@ function groundPlane() {
 function sandStreaks() {
   const period = 90;
   const g = new THREE.Group();
-  const mat = new THREE.MeshBasicMaterial({ color: 0x6b4a73, fog: false });
-  const matLight = new THREE.MeshBasicMaterial({ color: 0x8a5e86, fog: false });
-  const dark = [];
-  const light = [];
+  const dark = new THREE.Color(0x6b4a73);
+  const light = new THREE.Color(0x8a5e86);
+  const geos = [];
   const baked = new THREE.Matrix4();
   const q = new THREE.Quaternion().setFromEuler(new THREE.Euler(-Math.PI / 2, 0, 0));
   const v = new THREE.Vector3();
@@ -187,28 +207,27 @@ function sandStreaks() {
     for (let i = 0; i < 22; i++) {
       const len = 2 + rnd() * 7;
       const geo = new THREE.PlaneGeometry(len, 0.12 + rnd() * 0.2);
-      const bucket = rnd() > 0.5 ? dark : light;
+      const color = rnd() > 0.5 ? dark : light;
       // Same pattern in every repeat, so the wrap is invisible.
       geo.applyMatrix4(baked.compose(
         v.set(rep * period + rnd() * period - period / 2, GROUND_Y + 0.01, -8 - rnd() * 13),
         q, unit));
-      bucket.push(geo);
+      paint(geo, color);
+      geos.push(geo);
     }
     s = 7; // restart the sequence for the next repeat
   }
-  g.add(new THREE.Mesh(mergeGeometries(dark), mat));
-  g.add(new THREE.Mesh(mergeGeometries(light), matLight));
+  g.add(new THREE.Mesh(mergeGeometries(geos), new THREE.MeshBasicMaterial({ vertexColors: true, fog: false })));
   return { group: g, period };
 }
 
 function clouds() {
   const period = 520;
   const g = new THREE.Group();
-  const top = new THREE.MeshBasicMaterial({ color: 0xf6b3c2, fog: false });
-  const under = new THREE.MeshBasicMaterial({ color: 0xff9f7e, fog: false });
+  const top = new THREE.Color(0xf6b3c2);
+  const under = new THREE.Color(0xff9f7e);
   const shapes = [[-180, 30, 46], [-60, 37, 34], [70, 26, 52], [190, 33, 38]];
-  const topGeos = [];
-  const underGeos = [];
+  const geos = [];
   const baked = new THREE.Matrix4();
   const pos = new THREE.Vector3();
   const quat = new THREE.Quaternion();
@@ -223,12 +242,13 @@ function clouds() {
       body.applyMatrix4(baked.compose(pos.set(cx, y, 0), quat, scl.set(w / 2, 3.2, 1)));
       const belly = new THREE.CircleGeometry(1, 32);
       belly.applyMatrix4(baked.compose(pos.set(cx + w * 0.06, y - 2.4, 0.1), quat, scl.set(w / 2.4, 1.6, 1)));
-      topGeos.push(puff, body);
-      underGeos.push(belly);
+      paint(puff, top);
+      paint(body, top);
+      paint(belly, under);
+      geos.push(puff, body, belly);
     });
   }
-  g.add(new THREE.Mesh(mergeGeometries(topGeos), top));
-  g.add(new THREE.Mesh(mergeGeometries(underGeos), under));
+  g.add(new THREE.Mesh(mergeGeometries(geos), new THREE.MeshBasicMaterial({ vertexColors: true, fog: false })));
   g.position.z = -230;
   return { group: g, period };
 }
