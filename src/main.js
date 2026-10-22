@@ -6,6 +6,7 @@ import { createScenery, TRAVEL_SPEED } from './scenery.js';
 import { createControls } from './controls.js';
 import { createLofi } from './lofi.js';
 import { createBeamIn } from './beamin.js';
+import { createXRLoco, reducedMotion } from './comfort.js';
 
 const PAL = {
   wall: 0xc4b6c8, wallDeep: 0xa898b0, floor: 0xb8b0c4,
@@ -17,6 +18,10 @@ scene.background = new THREE.Color(0x2b1d4f);
 
 const camera = new THREE.PerspectiveCamera(70, innerWidth / innerHeight, 0.05, 700);
 camera.position.set(0, 1.6, 2.0);
+
+const rig = new THREE.Group();
+scene.add(rig);
+rig.add(camera);
 
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
@@ -341,10 +346,10 @@ const factory = new XRControllerModelFactory();
 function hook(i) {
   const c = renderer.xr.getController(i);
   c.addEventListener('selectstart', () => lofi.onGesture());
-  scene.add(c);
+  rig.add(c);
   const grip = renderer.xr.getControllerGrip(i);
   grip.add(factory.createControllerModel(grip));
-  scene.add(grip);
+  rig.add(grip);
   c.add(new THREE.Line(
     new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3(0, 0, -1.4)]),
     new THREE.LineBasicMaterial({ color: 0xd8c8e8 })
@@ -359,9 +364,16 @@ document.addEventListener('touchmove', (e) => { if (e.cancelable) e.preventDefau
 
 // Keep the eye inside the cabin: clear of the side walls, the window sill and
 // the screen bay at the back.
+const bounds = { minX: -ROOM_W / 2 + 0.45, maxX: ROOM_W / 2 - 0.45, minZ: winZ + 0.18 + 0.25 + 0.25, maxZ: ROOM_D / 2 - 0.55 };
 const controls = createControls({
   camera, renderer, canvas: renderer.domElement,
-  bounds: { minX: -ROOM_W / 2 + 0.45, maxX: ROOM_W / 2 - 0.45, minZ: winZ + 0.18 + 0.25 + 0.25, maxZ: ROOM_D / 2 - 0.55 },
+  bounds,
+});
+const loco = createXRLoco({ THREE, renderer, rig, camera, bounds });
+renderer.xr.addEventListener('sessionend', () => {
+  rig.position.set(0, 0, 0);
+  rig.rotation.set(0, 0, 0);
+  loco.reset();
 });
 
 const touch = document.getElementById('touch-controls')?.classList.contains('visible');
@@ -395,13 +407,15 @@ renderer.setAnimationLoop((time) => {
   const dt = last ? Math.min(0.05, (time - last) * 0.001) : 0.016;
   last = time;
   controls.update(dt);
+  loco.update(dt);
   scenery.update(dt);
   beamIn.update(t);
   wheels.forEach((w) => { w.rotation.x -= dt * TRAVEL_SPEED / WHEEL_R; });
-  blades.rotation.z = t * 0.4;
+  const calm = reducedMotion() ? 0.25 : 1;
+  blades.rotation.z = t * 0.4 * calm;
   const dp = dust.geometry.attributes.position;
   for (let i = 0; i < dp.count; i++) {
-    let y = dp.getY(i) + 0.002;
+    let y = dp.getY(i) + 0.002 * calm;
     if (y > ROOM_H - 0.1) y = 0.08;
     dp.setY(i, y);
   }
