@@ -1,10 +1,11 @@
 import * as THREE from 'three';
 import { VRButton } from 'three/addons/webxr/VRButton.js';
-import { XRControllerModelFactory } from 'three/addons/webxr/XRControllerModelFactory.js';
+import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { createScenery, TRAVEL_SPEED } from './scenery.js';
 import { createControls } from './controls.js';
 import { createLofi } from './lofi.js';
 import { createBeamIn } from './beamin.js';
+import { createXRLoco, reducedMotion } from './comfort.js';
 
 const PAL = {
   wall: 0xc4b6c8, wallDeep: 0xa898b0, floor: 0xb8b0c4,
@@ -17,6 +18,10 @@ scene.background = new THREE.Color(0x2b1d4f);
 const camera = new THREE.PerspectiveCamera(70, innerWidth / innerHeight, 0.05, 700);
 camera.position.set(0, 1.6, 2.0);
 
+const rig = new THREE.Group();
+scene.add(rig);
+rig.add(camera);
+
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
 renderer.setSize(innerWidth, innerHeight);
@@ -28,10 +33,12 @@ document.body.appendChild(VRButton.createButton(renderer));
 
 const toon = (color) => new THREE.MeshToonMaterial({ color });
 function edged(mesh, color = PAL.line) {
-  mesh.add(new THREE.LineSegments(
+  const lines = new THREE.LineSegments(
     new THREE.EdgesGeometry(mesh.geometry, 22),
     new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.5 })
-  ));
+  );
+  lines.userData.edge = true;
+  mesh.add(lines);
   return mesh;
 }
 function box(w, h, d, color = PAL.wall) {
@@ -138,15 +145,22 @@ hull.add(keel);
   pontoon.position.set(x, -0.55, 0.3);
   hull.add(pontoon);
 });
-const wheels = [];
-[[-4.6, -2.6], [-4.6, 2.8], [4.6, -2.6], [4.6, 2.8], [-4.6, 0.2], [4.6, 0.2]].forEach(([x, z]) => {
-  const w = new THREE.Mesh(new THREE.CylinderGeometry(1.15, 1.15, 0.55, 18), toon(0x4a4058));
-  w.rotation.z = Math.PI / 2;
-  w.position.set(x, -1.15, z);
-  edged(w, 0x2a2434);
-  hull.add(w);
-  wheels.push(w);
-});
+const wheelXZ = [[-4.6, -2.6], [-4.6, 2.8], [4.6, -2.6], [4.6, 2.8], [-4.6, 0.2], [4.6, 0.2]];
+const wheelSpin = new Float32Array(wheelXZ.length);
+const wheelDummy = new THREE.Object3D();
+const wheels = new THREE.InstancedMesh(new THREE.CylinderGeometry(1.15, 1.15, 0.55, 18), toon(0x4a4058), wheelXZ.length);
+wheels.frustumCulled = false;
+hull.add(wheels);
+function placeWheels() {
+  for (let i = 0; i < wheelXZ.length; i++) {
+    wheelDummy.position.set(wheelXZ[i][0], -1.15, wheelXZ[i][1]);
+    wheelDummy.rotation.set(wheelSpin[i], 0, Math.PI / 2);
+    wheelDummy.updateMatrix();
+    wheels.setMatrixAt(i, wheelDummy.matrix);
+  }
+  wheels.instanceMatrix.needsUpdate = true;
+}
+placeWheels();
 const prow = box(3.2, 1.1, 3.4, 0x9a8aa8);
 prow.position.set(0, 0.4, -6.4); // ahead of the cabin's left wall, outside it
 hull.add(prow);
@@ -168,15 +182,97 @@ fan.position.set(0, 1.65, ROOM_D / 2 - 0.2);
 cabin.add(fan);
 fan.add(edged(new THREE.Mesh(new THREE.RingGeometry(0.4, 0.58, 24), toon(PAL.metal))));
 const blades = new THREE.Group();
-for (let i = 0; i < 10; i++) {
-  const b = new THREE.Mesh(new THREE.BoxGeometry(0.07, 0.44, 0.02), toon(0x1a1822));
-  b.position.y = 0.2;
-  const g = new THREE.Group();
-  g.rotation.z = (i / 10) * Math.PI * 2;
-  g.add(b);
-  blades.add(g);
+{
+  const geos = [];
+  for (let i = 0; i < 10; i++) {
+    const g = new THREE.BoxGeometry(0.07, 0.44, 0.02);
+    g.translate(0, 0.2, 0);
+    g.rotateZ((i / 10) * Math.PI * 2);
+    geos.push(g);
+  }
+  blades.add(new THREE.Mesh(mergeGeometries(geos), toon(0x1a1822)));
 }
 fan.add(blades);
+
+// Bake opaque front-side toon surfaces into one vertex-coloured mesh. Emissive,
+// transparent and DoubleSide keep a mesh per material. Every edge line becomes one.
+// Glass, the fan, the sail and the wheels stay as they are; screens are added later.
+function mergeStatic(group, skip) {
+  group.updateMatrixWorld(true);
+  const meshBuckets = new Map();
+  const colorGeos = [];
+  const lineGeos = [];
+  const paint = (geo, color) => {
+    const n = geo.attributes.position.count;
+    const arr = new Float32Array(n * 3);
+    const { r, g, b } = color;
+    for (let i = 0; i < n; i++) {
+      arr[i * 3] = r;
+      arr[i * 3 + 1] = g;
+      arr[i * 3 + 2] = b;
+    }
+    geo.setAttribute('color', new THREE.Float32BufferAttribute(arr, 3));
+  };
+  for (const mesh of [...group.children]) {
+    if (skip.has(mesh)) continue;
+    if (!(mesh instanceof THREE.Mesh)) continue;
+    const mat = mesh.material;
+    if (!(mat instanceof THREE.MeshToonMaterial) || mat.map) continue;
+
+    let geo = mesh.geometry.clone();
+    if (geo.index) geo = geo.toNonIndexed();
+    for (const name of Object.keys(geo.attributes)) {
+      if (name !== 'position' && name !== 'normal' && name !== 'uv') geo.deleteAttribute(name);
+    }
+    geo.applyMatrix4(mesh.matrix);
+    // Opaque, black emissive, FrontSide: one shared vertex-colour bucket.
+    if (!mat.transparent && mat.emissive.getHex() === 0 && mat.side === THREE.FrontSide) {
+      paint(geo, mat.color);
+      colorGeos.push(geo);
+    } else {
+      geo.deleteAttribute('color');
+      const key = [mat.color.getHex(), mat.emissive.getHex(), mat.emissiveIntensity, mat.transparent, mat.opacity, mat.side].join('|');
+      let bucket = meshBuckets.get(key);
+      if (!bucket) {
+        bucket = { material: mat, geos: [] };
+        meshBuckets.set(key, bucket);
+      }
+      bucket.geos.push(geo);
+    }
+
+    for (const line of mesh.children) {
+      if (!(line instanceof THREE.LineSegments)) continue;
+      const lg = line.geometry.clone();
+      lg.applyMatrix4(mesh.matrix);
+      lg.applyMatrix4(line.matrix);
+      for (const name of Object.keys(lg.attributes)) {
+        if (name !== 'position') lg.deleteAttribute(name);
+      }
+      paint(lg, line.material.color);
+      lineGeos.push(lg);
+    }
+    group.remove(mesh);
+  }
+  if (colorGeos.length) {
+    group.add(new THREE.Mesh(
+      mergeGeometries(colorGeos),
+      new THREE.MeshToonMaterial({ vertexColors: true, color: 0xffffff })
+    ));
+  }
+  for (const { material, geos } of meshBuckets.values()) {
+    group.add(new THREE.Mesh(mergeGeometries(geos), material));
+  }
+  if (lineGeos.length) {
+    const lines = new THREE.LineSegments(
+      mergeGeometries(lineGeos),
+      new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, opacity: 0.5 })
+    );
+    lines.userData.edge = true;
+    group.add(lines);
+  }
+}
+mergeStatic(cabin, new Set([glass, fan]));
+mergeStatic(hull, new Set([sail, wheels]));
 
 function makeCanvas(w, h) {
   const c = document.createElement('canvas');
@@ -284,14 +380,22 @@ if (musicBtn) {
 // the finger going down, so listen for those. Lifting a stick counts too.
 ['pointerup', 'touchend', 'click', 'keydown'].forEach((ev) => addEventListener(ev, () => lofi.onGesture(), { passive: true }));
 
-const factory = new XRControllerModelFactory();
+const gripMat = new THREE.MeshToonMaterial({ color: 0x3a3148 });
+const barrel = new THREE.CylinderGeometry(0.018, 0.024, 0.11, 12);
+barrel.rotateX(-Math.PI / 2);
+barrel.translate(0, 0, 0.02);
+const ring = new THREE.TorusGeometry(0.04, 0.008, 6, 20);
+ring.translate(0, 0, -0.03);
+const gripGeo = mergeGeometries([barrel, ring]);
+barrel.dispose();
+ring.dispose();
 function hook(i) {
   const c = renderer.xr.getController(i);
   c.addEventListener('selectstart', () => lofi.onGesture());
-  scene.add(c);
+  rig.add(c);
   const grip = renderer.xr.getControllerGrip(i);
-  grip.add(factory.createControllerModel(grip));
-  scene.add(grip);
+  grip.add(new THREE.Mesh(gripGeo, gripMat));
+  rig.add(grip);
   c.add(new THREE.Line(
     new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3(0, 0, -1.4)]),
     new THREE.LineBasicMaterial({ color: 0xd8c8e8 })
@@ -306,9 +410,26 @@ document.addEventListener('touchmove', (e) => { if (e.cancelable) e.preventDefau
 
 // Keep the eye inside the cabin: clear of the side walls, the window sill and
 // the screen bay at the back.
+const bounds = { minX: -ROOM_W / 2 + 0.45, maxX: ROOM_W / 2 - 0.45, minZ: winZ + 0.18 + 0.25 + 0.25, maxZ: ROOM_D / 2 - 0.55 };
 const controls = createControls({
   camera, renderer, canvas: renderer.domElement,
-  bounds: { minX: -ROOM_W / 2 + 0.45, maxX: ROOM_W / 2 - 0.45, minZ: winZ + 0.18 + 0.25 + 0.25, maxZ: ROOM_D / 2 - 0.55 },
+  bounds,
+});
+const loco = createXRLoco({
+  THREE, renderer, rig, camera, bounds,
+  controllers: [renderer.xr.getController(0), renderer.xr.getController(1)],
+});
+function setEdgesVisible(on) {
+  scene.traverse((obj) => {
+    if (obj.userData.edge || obj.userData.rim) obj.visible = on;
+  });
+}
+renderer.xr.addEventListener('sessionstart', () => setEdgesVisible(false));
+renderer.xr.addEventListener('sessionend', () => {
+  rig.position.set(0, 0, 0);
+  rig.rotation.set(0, 0, 0);
+  loco.reset();
+  setEdgesVisible(true);
 });
 
 const touch = document.getElementById('touch-controls')?.classList.contains('visible');
@@ -342,13 +463,16 @@ renderer.setAnimationLoop((time) => {
   const dt = last ? Math.min(0.05, (time - last) * 0.001) : 0.016;
   last = time;
   controls.update(dt);
+  loco.update(dt);
   scenery.update(dt);
   beamIn.update(t);
-  wheels.forEach((w) => { w.rotation.x -= dt * TRAVEL_SPEED / WHEEL_R; });
-  blades.rotation.z = t * 0.4;
+  for (let i = 0; i < wheelSpin.length; i++) wheelSpin[i] -= dt * TRAVEL_SPEED / WHEEL_R;
+  placeWheels();
+  const calm = reducedMotion() ? 0.25 : 1;
+  blades.rotation.z = t * 0.4 * calm;
   const dp = dust.geometry.attributes.position;
   for (let i = 0; i < dp.count; i++) {
-    let y = dp.getY(i) + 0.002;
+    let y = dp.getY(i) + 0.002 * calm;
     if (y > ROOM_H - 0.1) y = 0.08;
     dp.setY(i, y);
   }
